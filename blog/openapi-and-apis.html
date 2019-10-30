@@ -1,0 +1,87 @@
+<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,minimum-scale=1,initial-scale=1"/><meta charSet="utf-8"/><title>Seb Renauld: The Blog</title><meta name="description" content=""/><meta name="og:type" content="article"/><meta name="og:title" content="Seb Renauld: The Blog"/><meta name="og:description" content=""/><meta name="article:published_time" content="2019-10-17T23:03:40.783Z"/><meta name="article:modified_time" content="2019-10-17T23:03:40.783Z"/><meta name="next-head-count" content="9"/><link rel="preload" href="/_next/static/k9Tsyw2bs_duP6gcMg2ED/pages/blog/openapi-and-apis.js" as="script"/><link rel="preload" href="/_next/static/k9Tsyw2bs_duP6gcMg2ED/pages/_app.js" as="script"/><link rel="preload" href="/_next/static/runtime/webpack-4b444dab214c6491079c.js" as="script"/><link rel="preload" href="/_next/static/chunks/commons.7ec34d40d11e0acf15af.js" as="script"/><link rel="preload" href="/_next/static/runtime/main-e0229bd494a4c8597645.js" as="script"/><link rel="preload" href="/_next/static/chunks/styles.4b73f07039d533b46a6b.js" as="script"/><link rel="stylesheet" href="/_next/static/css/styles.93ca2d38.chunk.css"/></head><body><div class="site-container"><div id="__next"><header class="nav-bar"><div class="nav-content"><div class="menu-button-container" style="display:none"><button class="expand-button"><span class="fas fa-bars"> </span></button></div><a class="logo home-link" style="opacity:0" href="/"><img src="/static/logo.png" alt="" class="logo-image"/></a><div class="nav-link-bg" style="display:none"></div><nav class="nav-link-container"><ul><li class="nav-link nav-item"><a href="/blog/index">Blog</a></li><li class="nav-link nav-item"><a href="/resume">Resume</a></li><li class="nav-link nav-item"><a href="/contact">Contact me</a></li></ul></nav><div style="display:none" class="search-box search-box-mobile"><input type="text" placeholder="Search..." class=""/><button class="icon"><i class="fas fa-search"></i></button><ul class="suggestions"></ul></div></div></header><div class="site-content"><div><div class="blog-article"><h3 id="onopenapitoolingsforcodegenerationandapis">On OpenAPI, toolings for code generation, and APIs</h3>
+<p>Over the past week, I've had the opportunity to plan ahead for the development of multiple language SDKs for 
+<a href="https://www.loriot.io">LORIOT</a>. As a LoRa back-office and network provider, they've been consistently open and 
+actively encourage people to build on top of their solution.</p>
+<p>Due to the scope of it, it made sense to leverage the fact that they have a (mostly correct) OpenAPI schema for 
+all their APIs (Available <a href="https://docs.loriot.io">here</a>). The biggest pain point when writing code that 
+provides interoperability with an external service tends to be the network layer itself, and due to the customization 
+constraints of the actual business logic, it made sense to leverage this document and programmatically generate 
+this network layer.</p>
+<h4 id="enteropenapigenerator">Enter <code>openapi-generator</code></h4>
+<p>The OpenAPI foundation has built and maintains a tool to generate network-level code for a wide variety of languages. 
+As this is exactly what I was looking for, it only made sense to test it. My initial target language was Rust, because 
+I have a direct need for this language, but Javascript is also considered.</p>
+<p>The Rust module was, to be frank, in shambles. I've contributed a 
+<a href="https://github.com/OpenAPITools/openapi-generator/pull/4175">pull request</a> to help bring it up into 2019. At its core, 
+it was sane, it was just using fully blocking I/O.</p>
+<p>The generated code is directly usable, and well structured if the openAPI input is sane. This requirement will be the 
+subject of this article.</p>
+<h4 id="openapipitfalls">OpenAPI pitfalls</h4>
+<p>OpenAPI is a well-codified standard designed to describe HTTP APIs. At its core, it is aimed at being able to test an 
+implementation against the schema, or generate documentation from the schema. It also heavily encourages sane design 
+decisions such as re-using entities by actively encouraging the definition and re-use of "components".</p>
+<p>Here are a couple of mistakes you can avoid to make automatic testing and code-generation of your API clients seamless:</p>
+<h5 id="1notdefiningclearentities">1. Not defining clear entities</h5>
+<p>Consider the following case: you have an API returning cats. <code>/cats</code> is your paginated list, <code>/cat/{id}</code> is your entity 
+retrieval. It is very tempting to not define an entity and define the element as a free-flowing schema in both cases, 
+like so:</p>
+<pre><code>paths:
+  /cats:
+    get:
+      summary: Retrieve a paginated slice of cats
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      ...
+  /cat/{catId}:
+    get:
+      summary: Retrieve a cat
+      parameters:
+        - $ref: '#/components/parameters/catId'
+      responses:
+        200:
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                ...
+</code></pre>
+<p>Doing this is a nice and straightforward way to get documentation going, as the entities are represented. However, it has two 
+serious drawbacks:</p>
+<ol>
+<li>The information that the two entities are <em>the same</em> has been lost. To any documentation/validation/generation tool, these 
+are now two separate entities</li>
+<li>Modifying the schema of this entity requires the author to modify N copies.</li>
+</ol>
+<h5 id="2notdefiningrequiredproperties">2. Not defining required properties</h5>
+<p>Another very common mistake is just describing the schema without clearly labeling optional and mandatory parameters. Consider 
+the generated signature of a method where this has been done, and when it has not:</p>
+<pre><code>fn models_get(&amp;self, page: Option&lt;f32&gt;, per_page: Option&lt;f32&gt;, filter: Option&lt;&amp;str&gt;, sort: Option&lt;&amp;str&gt;) -&gt; Box&lt;dyn Future&lt;Item = Model, Error = Error&gt; + Send&gt;;
+fn models_get(&amp;self, page: usize, per_page: usize, sort: SortOrder, filter: Option&lt;&amp;str&gt;) -&gt; Box&lt;dyn Future&lt;Item = Model, Error = Error&gt; + Send&gt;;
+</code></pre>
+<p>The second one is clearer and easier to manipulate programmatically: it clearly describes what is optional and what is not. The <code>page</code> and <code>per_page</code> 
+elements are mandatory and well-typed; the <code>sort</code> is a defined enum of possible choices (<code>asc</code>, <code>desc</code>). The <code>filter</code> is free-flow, and as such, 
+represented by a string slice. Much neater, much easier to manage and much clearer.</p>
+<h5 id="3notproperlydefiningerrors">3. Not properly defining errors</h5>
+<p>Following the lead of the previous item, not properly defining errors prevent you from gleaning additional context from your API, <em>particularly</em> 
+if the API is not fully RESTful to start with (and some errors come up as successful - i.e. 2xx or 3xx HTTP status code). Additionally, if an error 
+schema is defined, it will surface both in documentation tools and generators, so it is also worth being precise on this.</p>
+<h4 id="thetools">The tools</h4>
+<p>Following these guidelines enables the use of a couple of very neat tools:</p>
+<ul>
+<li><a href="http://dredd.io/en/latest/"><code>dredd</code></a> for API validation, to make sure you have built what you described</li>
+<li><a href="https://stoplight.io/docs/"><code>Stoplight</code></a> and <a href="https://redocly.github.io/redoc/"><code>ReDoc</code></a> to write your documentation for you</li>
+<li><code>openapi-generator</code> to write some of the business logic for you</li>
+</ul>
+<p>I am in the process of writing the business logic for the LORIOT SDK in multiple languages and intend to reap all the benefits of these tools. Watch 
+<a href="https://github.com/srenauld/loriot-codegen">the Github repository</a> to keep up to date with progress (or contribute a version in a language I am not an expert at!). I will have the pleasure of being able to actually use all the tools I have mentioned here in a real environment and will make sure to document all of it.</p></div></div></div></div><script id="__NEXT_DATA__" type="application/json">{"dataManager":"[]","props":{"pageProps":{}},"page":"/blog/openapi-and-apis","query":{},"buildId":"k9Tsyw2bs_duP6gcMg2ED","nextExport":true,"autoExport":true}</script><script async="" data-next-page="/blog/openapi-and-apis" src="/_next/static/k9Tsyw2bs_duP6gcMg2ED/pages/blog/openapi-and-apis.js"></script><script async="" data-next-page="/_app" src="/_next/static/k9Tsyw2bs_duP6gcMg2ED/pages/_app.js"></script><script src="/_next/static/runtime/webpack-4b444dab214c6491079c.js" async=""></script><script src="/_next/static/chunks/commons.7ec34d40d11e0acf15af.js" async=""></script><script src="/_next/static/runtime/main-e0229bd494a4c8597645.js" async=""></script><script src="/_next/static/chunks/styles.4b73f07039d533b46a6b.js" async=""></script></div></body></html>

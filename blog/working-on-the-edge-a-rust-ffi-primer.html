@@ -1,0 +1,144 @@
+<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,minimum-scale=1,initial-scale=1"/><meta charSet="utf-8"/><title>Seb Renauld: The Blog</title><meta name="description" content=""/><meta name="og:type" content="article"/><meta name="og:title" content="Seb Renauld: The Blog"/><meta name="og:description" content=""/><meta name="article:published_time" content="2019-10-18T09:52:11.506Z"/><meta name="article:modified_time" content="2019-10-18T09:52:11.506Z"/><meta name="next-head-count" content="9"/><link rel="preload" href="/_next/static/k9Tsyw2bs_duP6gcMg2ED/pages/blog/working-on-the-edge-a-rust-ffi-primer.js" as="script"/><link rel="preload" href="/_next/static/k9Tsyw2bs_duP6gcMg2ED/pages/_app.js" as="script"/><link rel="preload" href="/_next/static/runtime/webpack-4b444dab214c6491079c.js" as="script"/><link rel="preload" href="/_next/static/chunks/commons.7ec34d40d11e0acf15af.js" as="script"/><link rel="preload" href="/_next/static/runtime/main-e0229bd494a4c8597645.js" as="script"/><link rel="preload" href="/_next/static/chunks/styles.4b73f07039d533b46a6b.js" as="script"/><link rel="stylesheet" href="/_next/static/css/styles.93ca2d38.chunk.css"/></head><body><div class="site-container"><div id="__next"><header class="nav-bar"><div class="nav-content"><div class="menu-button-container" style="display:none"><button class="expand-button"><span class="fas fa-bars"> </span></button></div><a class="logo home-link" style="opacity:0" href="/"><img src="/static/logo.png" alt="" class="logo-image"/></a><div class="nav-link-bg" style="display:none"></div><nav class="nav-link-container"><ul><li class="nav-link nav-item"><a href="/blog/index">Blog</a></li><li class="nav-link nav-item"><a href="/resume">Resume</a></li><li class="nav-link nav-item"><a href="/contact">Contact me</a></li></ul></nav><div style="display:none" class="search-box search-box-mobile"><input type="text" placeholder="Search..." class=""/><button class="icon"><i class="fas fa-search"></i></button><ul class="suggestions"></ul></div></div></header><div class="site-content"><div><div class="blog-article"><h3 id="workingontheedgeffiandrust">Working on the Edge: FFI and Rust</h3>
+<p>Following a rise in questions related to FFI to and from Rust on StackOverflow, I decided to attempt to write a primer aimed 
+at trying to demystify some of the teething problems commonly encountered when stepping between languages. This will end up being 
+relatively technical and will assume some basic knowledge of hardware-specific details, particularly data and memory synchronization.</p>
+<h4 id="whatisffi">What is FFI?</h4>
+<p><a href="https://doc.rust-lang.org/nomicon/ffi.html">Foreign Function Interfacee</a> is a mechanism present in Rust (and many other languages!) that 
+allows the user to execute code originally written using another language. This typically uses the C ABI as a base standard.</p>
+<p>This allows you to do some pretty nifty stuff, like being able to leverage the wide ecosystem of libraries present out there; anything that 
+exports a shared object is potentially usable by leveraging FFI. This, in turn, is a panacea for embedded software development and iteratively 
+being able to convert a codebase from C to Rust (or vice versa), or even simply to leverage each environment's strengths.</p>
+<p>The aim of these articles will be to highlight the basics (and caveats), some common interop tricks for frequent FFI boundaries, and provide 
+a reason as to the <em>why</em></p>
+<h4 id="thecabiaprimer">The C ABI: A primer</h4>
+<p>Before delving into FFI in Rust per se, we need to know how it works, in order to be able to establish its limitations. Rust, by default, comes 
+with a wide array of calling conventions supported by the <code>extern</code> block: <code>C</code>/<code>cdecl</code> for *nix, <code>stdcall</code>, <code>system</code> and <code>win64</code> for Windows. 
+In this primer, we'll focus on the <code>C</code> calling convention (the so-called <code>C ABI</code>), as this is most likely what you will encounter the most. Below 
+the hood, this will result in different opcode based on what target you are compiling for; after all, I did call it "so-called" because it is not 
+one ABI, but many variants of an ABI based on the architecture you're running on (or compiling for). This is largely hidden to you as an 
+implementation detail and handled by whichever compiler you are using below the hood.</p>
+<p>There is one more thing we need to care about when it comes to a broad overview: everything <strong>needs</strong> to respect the memory alignment of whatever 
+architecture you're targetting. If an <code>unsigned char</code> is 8bit-aligned, for example, this means that the minimum memory unit you will be able to get 
+by allocating is 8bit. This leads to even crazier stuff when you consider structures, as <em>they</em> also have their own data alignment conventions, as 
+illustrated by the following snippet:</p>
+<pre><code>    #[repr(C)]
+    struct TwoBools {
+        pub a: bool,
+        pub b: bool
+    }
+
+    #[no_mangle]
+    extern "C" fn take_bools(input: TwoBools, input2: TwoBools) {
+
+        println!("Passed memory addresses: {:?} {:?}", &amp;input as *const _, &amp;input2 as *const _);
+        println!("Struct 1 bools: {:?} {:?}", &amp;input.a as *const _, &amp;input.b as *const _);
+        println!("Struct 2 bools: {:?} {:?}", &amp;input2.a as *const _, &amp;input2.b as *const _);
+    }
+    fn main() {
+        let input = TwoBools {
+            a: true,
+            b: false
+        };
+        let input2 = TwoBools {
+            a: true,
+            b: false
+        };
+        println!("Initial memory addresses: {:?} {:?}", &amp;input as *const _, &amp;input2 as *const _);
+        take_bools(input, input2);
+    }
+</code></pre>
+<p>On a windows x64 machine, the output is as follows, without packing:</p>
+<table class="table" >
+<thead>
+<tr>
+<th>Structure</th>
+<th>Address 1</th>
+<th>Address 2</th>
+<th>Difference</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>before FFI</td>
+<td>0xf831dcf8f8</td>
+<td>0xf831dcf900</td>
+<td>8 bytes</td>
+</tr>
+<tr>
+<td>after FFI</td>
+<td>0xf831dcf718</td>
+<td>0xf831dcf720</td>
+<td>8 bytes</td>
+</tr>
+<tr>
+<td>Bool pre-FFI</td>
+<td>0xf831dcf718</td>
+<td>0xf831dcf719</td>
+<td>1 byte each</td>
+</tr>
+<tr>
+<td>bool post-FFI</td>
+<td>0xf831dcf720</td>
+<td>0xf831dcf721</td>
+<td>1 byte each</td>
+</tr>
+</tbody>
+</table>
+<p>Packing has an additional effect in this, allowing you to get rid of the 6 byte loss at a cost of a potentially 
+sub-optimal read and write pattern set.</p>
+<p>To highlight the architecture difference, this is on an ARM9 processor (ARM926EJ-S, ARMv5TE microarchitecture):</p>
+<table class="table" >
+<thead>
+<tr>
+<th>Structure</th>
+<th>Address 1</th>
+<th>Address 2</th>
+<th>Difference</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>after FFI</td>
+<td>0xbec54568</td>
+<td>0xbec5456a</td>
+<td>2 bytes</td>
+</tr>
+<tr>
+<td>bool post-FFI</td>
+<td>0xbec54568</td>
+<td>0xbec54569</td>
+<td>1 byte each</td>
+</tr>
+</tbody>
+</table>
+<p>This will be a topic for another day; the important takeaway is twofold:</p>
+<ul>
+<li>You cannot rely on a structure having a fixed memory size (software developers familiar with C will know this)</li>
+<li>You cannot even rely on a structure having the same memory size without explicitly specifying packing and alignment</li>
+</ul>
+<p>The key details we need to know (and care about) regarding the calling convention all reside in the boundary itself:</p>
+<ol>
+<li><strong>How do we pass function arguments?</strong> </li>
+</ol>
+<p>Fortunately, that is an easy question to answer as both <code>cdecl</code> and <code>stdcall</code> provide the same answer, at least from an overview: all arguments 
+passed to a function called using these calling conventions reside on the stack. This provides both advantages and disadvantages.</p>
+<p>Since our stack is somewhat limited in space (the default tends to hover around 2MB), this means that we need to be careful not to pass too much 
+data around. This also means that anything passed is passed by value; fortunately, we can leverage this as a feature and not a limitation with pointers, 
+and anybody coming from the C/C++ world should be familiar with this (if you're not, <a href="https://denniskubes.com/2017/01/24/the-5-minute-guide-to-c-pointers/">this primer on the subject</a> is a pretty neat primer on the subject).</p>
+<ol start="2">
+<li><strong>How do we retrieve the return value</strong></li>
+</ol>
+<p>The return value of anything we call will also be on the stack and comes from the standard assembly rules - a <code>ret</code> instruction contains the information 
+necessary to establish where to jump back to, along with how many elements of the stack are being returned. The same rules apply as anything on the stack.</p>
+<h4 id="typesandpointers">Types and pointers</h4>
+<p>Some types (essentially all primitive types) have direct equivalents in the <code>libc</code> crate and can be passed untouched through FFI. Some, on the other hand, require a bit more work. First, let's talk about the exceptions:</p>
+<ul>
+<li>A Rust <code>&amp;str</code> is <strong>not</strong> exactly equivalent to a <code>*const libc::char_t</code>. There is a crucial distinction, as any Rust string (<code>&amp;str</code> or <code>String</code>) has 
+the additional requirement of being valid UTF-8. For this reason, the conversion from <code>&amp;str</code> to <code>*const libc::char_t</code> is direct, but the conversion 
+from <code>*const libc::char_t</code> is not (and requires <a href="https://doc.rust-lang.org/beta/std/str/fn.from_utf8.html"><code>std::str::from_utf8()</code></a>). </li>
+<li>Slices can be passed and convert to their pointer type (i.e. <code>&amp;[u8]</code> -&gt; <code>*const libc::uint8_t</code>). However, <code>Vec&lt;_&gt;</code> cannot, as there is additional 
+information needed. A <code>Vec</code> is commonly called a fat pointer, due to its knowledge of its length <em>and</em> allocation length. Fortunately, every <code>Vec&lt;_&gt;</code> can <code>Deref</code> to a slice.</li>
+</ul>
+<p>Beyond that, however, the rules are simple: if a <code>struct</code> converts down to primitive types, it can be passed provided there is an exact equivalent on 
+the other side. For the majority of cases, when going from Rust to C, a tool such as <a href="https://github.com/eqrion/cbindgen"><code>cbindgen</code></a> is a valuable 
+addition to <code>build.rs</code>, in order to automatically derive C headers for your project.</p></div></div></div></div><script id="__NEXT_DATA__" type="application/json">{"dataManager":"[]","props":{"pageProps":{}},"page":"/blog/working-on-the-edge-a-rust-ffi-primer","query":{},"buildId":"k9Tsyw2bs_duP6gcMg2ED","nextExport":true,"autoExport":true}</script><script async="" data-next-page="/blog/working-on-the-edge-a-rust-ffi-primer" src="/_next/static/k9Tsyw2bs_duP6gcMg2ED/pages/blog/working-on-the-edge-a-rust-ffi-primer.js"></script><script async="" data-next-page="/_app" src="/_next/static/k9Tsyw2bs_duP6gcMg2ED/pages/_app.js"></script><script src="/_next/static/runtime/webpack-4b444dab214c6491079c.js" async=""></script><script src="/_next/static/chunks/commons.7ec34d40d11e0acf15af.js" async=""></script><script src="/_next/static/runtime/main-e0229bd494a4c8597645.js" async=""></script><script src="/_next/static/chunks/styles.4b73f07039d533b46a6b.js" async=""></script></div></body></html>
